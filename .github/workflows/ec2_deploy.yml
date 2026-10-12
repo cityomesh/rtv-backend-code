@@ -1,0 +1,55 @@
+name: CI/CD Pipeline - Spring Boot to EC2
+
+on:
+  push:
+    branches:
+      - devsdfd   # or your deployment branch
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1 - Checkout code
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Step 2 - Set up JDK 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # Step 3 - Build with Maven
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      # Step 4 - Copy JAR to EC2 (overwrite existing JAR)
+      - name: Copy JAR to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "target/rtvnewsnetwork.jar"
+          target: "/home/ubuntu/rtv-dev/"
+          overwrite: true
+          strip_components: 1
+
+      # Step 5 - Restart Spring Boot App on EC2
+      - name: Restart App on EC2
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "Stopping rtvnewsnetwork service..."
+            sudo systemctl stop rtvnewsnetwork || true
+            echo "Reloading systemd..."
+            sudo systemctl daemon-reload
+            echo "Starting rtvnewsnetwork service..."
+            sudo systemctl start rtvnewsnetwork
+            echo "Checking status..."
+            sudo systemctl status rtvnewsnetwork --no-pager

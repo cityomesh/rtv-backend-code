@@ -1,0 +1,122 @@
+
+name: Deploy Spring Boot to ECS
+
+on:
+  push:
+    branches:
+      - dev
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: prod/rtv
+  ECS_SERVICE: rtv-backend-prod
+  ECS_CLUSTER: rtv-cluster
+  ECS_TASK_DEFINITION: task-def.json
+  CONTAINER_NAME: rtv-prod
+
+jobs:
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      # 1️⃣ Checkout source code
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2️⃣ Set up Java 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # 3️⃣ Build Spring Boot JAR
+      - name: Build Spring Boot JAR
+        run: |
+          chmod +x mvnw || true
+          ./mvnw clean package -DskipTests
+          echo " Build complete. Contents of target/:"
+          ls -lh target/
+
+      # 4⃣ Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      # 5️ Login to Amazon Public ECR
+      - name: Login to Amazon Public ECR
+        run: |
+          aws ecr-public get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin public.ecr.aws/h1u6n2y7
+          echo " Logged in to Amazon Public ECR"
+
+      # 6️ Build & Push Docker Image
+      - name: Build & Push Docker Image
+        id: build-image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI=public.ecr.aws/h1u6n2y7/prod/rtv:$IMAGE_TAG
+          echo "🔧 Building Docker image: $IMAGE_URI"
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+          echo " Docker image pushed: $IMAGE_URI"
+          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+      # 7️⃣ Download Current ECS Task Definition
+      - name: Download ECS Task Definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition rtv-prod \
+            --region ap-south-1 \
+            --query taskDefinition \
+            --output json > $ECS_TASK_DEFINITION
+          echo " Downloaded current ECS task definition"
+
+      # 8️ Clean Unsupported ECS Fields
+      - name: Clean Task Definition JSON
+        run: |
+          cat $ECS_TASK_DEFINITION | jq 'del(
+            .status,
+            .revision,
+            .taskDefinitionArn,
+            .requiresAttributes,
+            .registeredBy,
+            .registeredAt,
+            .compatibilities
+          )' > cleaned-task-def.json
+          mv cleaned-task-def.json $ECS_TASK_DEFINITION
+          echo " Cleaned ECS task definition"
+
+      # 9️⃣ Update Task Definition with New Image
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: rtv-prod
+          image: ${{ steps.build-image.outputs.image }}
+
+      #  Deploy ECS Service
+      - name: Deploy ECS Service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: rtv-backend-prod
+          cluster: rtv-cluster
+          wait-for-service-stability: true
+
+      #  Verify ECS Deployment
+      - name: Verify ECS Deployment
+        run: |
+          echo "🔍 Checking ECS service details..."
+          aws ecs describe-services \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION \
+            --query "services[0].{serviceName:serviceName,taskDefinition:taskDefinition,runningCount:runningCount,desiredCount:desiredCount}"
+
